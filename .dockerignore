@@ -1,0 +1,6 @@
+**
+!out/
+!out/linux-amd64/
+!out/linux-amd64/*
+!deploy/
+!deploy/Dockerfile
