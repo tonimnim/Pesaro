@@ -1,0 +1,153 @@
+[
+  {
+    "id": "identity",
+    "name": "Identity",
+    "port": 8101,
+    "stage": "scaffold",
+    "implementation_phase": "M2: authenticated pilot boundary",
+    "planned_dependencies": [
+      "customer-directory"
+    ]
+  },
+  {
+    "id": "customer-directory",
+    "name": "Customer Directory",
+    "port": 8102,
+    "stage": "scaffold",
+    "implementation_phase": "M2: authenticated pilot boundary",
+    "planned_dependencies": []
+  },
+  {
+    "id": "wallets",
+    "name": "Wallets",
+    "port": 8103,
+    "stage": "scaffold",
+    "implementation_phase": "M1 fixtures; M2 wallet lifecycle API",
+    "planned_dependencies": [
+      "customer-directory",
+      "ledger"
+    ]
+  },
+  {
+    "id": "payments",
+    "name": "Payments",
+    "port": 8104,
+    "stage": "scaffold",
+    "implementation_phase": "M1: first end-to-end payment slice",
+    "planned_dependencies": [
+      "ledger",
+      "wallets",
+      "risk",
+      "rail-connectors"
+    ]
+  },
+  {
+    "id": "ledger",
+    "name": "Ledger",
+    "port": 8105,
+    "stage": "scaffold",
+    "implementation_phase": "M1: first implementation priority",
+    "planned_dependencies": []
+  },
+  {
+    "id": "risk",
+    "name": "Risk",
+    "port": 8106,
+    "stage": "scaffold",
+    "implementation_phase": "M2: authenticated pilot boundary",
+    "planned_dependencies": [
+      "ledger",
+      "identity"
+    ]
+  },
+  {
+    "id": "merchants",
+    "name": "Merchants",
+    "port": 8107,
+    "stage": "scaffold",
+    "implementation_phase": "M3: commerce after money correctness",
+    "planned_dependencies": [
+      "payments",
+      "wallets",
+      "delivery"
+    ]
+  },
+  {
+    "id": "agents",
+    "name": "Agents",
+    "port": 8108,
+    "stage": "scaffold",
+    "implementation_phase": "M3: controlled cash pilot",
+    "planned_dependencies": [
+      "payments",
+      "wallets",
+      "treasury",
+      "cases"
+    ]
+  },
+  {
+    "id": "rail-connectors",
+    "name": "Rail Connectors",
+    "port": 8109,
+    "stage": "scaffold",
+    "implementation_phase": "M1 simulated contract; M2 real adapters",
+    "planned_dependencies": [
+      "ledger"
+    ]
+  },
+  {
+    "id": "treasury",
+    "name": "Treasury",
+    "port": 8110,
+    "stage": "scaffold",
+    "implementation_phase": "M2: external settlement and liquidity",
+    "planned_dependencies": [
+      "ledger",
+      "payments",
+      "reconciliation"
+    ]
+  },
+  {
+    "id": "reconciliation",
+    "name": "Reconciliation",
+    "port": 8111,
+    "stage": "scaffold",
+    "implementation_phase": "M1 independent verifier; M2 external feeds",
+    "planned_dependencies": [
+      "ledger",
+      "payments",
+      "rail-connectors"
+    ]
+  },
+  {
+    "id": "cases",
+    "name": "Cases and Operations",
+    "port": 8112,
+    "stage": "scaffold",
+    "implementation_phase": "M2: recovery and controlled operations",
+    "planned_dependencies": [
+      "ledger",
+      "payments",
+      "reconciliation"
+    ]
+  },
+  {
+    "id": "activity",
+    "name": "Activity and Statements",
+    "port": 8113,
+    "stage": "scaffold",
+    "implementation_phase": "M2: customer history",
+    "planned_dependencies": [
+      "ledger",
+      "payments"
+    ]
+  },
+  {
+    "id": "delivery",
+    "name": "Delivery",
+    "port": 8114,
+    "stage": "scaffold",
+    "implementation_phase": "M2: notifications and webhooks",
+    "planned_dependencies": []
+  }
+]
