@@ -1,0 +1,12 @@
+/out/
+/.cache/
+/coverage.out
+*.test
+*.exe
+.env
+.env.*
+!.env.example
+
+# Keep Markdown documentation and agent instructions local.
+*.[mM][dD]
+*.[mM][aA][rR][kK][dD][oO][wW][nN]
