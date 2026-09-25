@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -194,6 +195,102 @@ func TestDeterministicHoldVersusSpend(t *testing.T) {
 			}
 			assertRaceReplay(t, e, snapshot, commands, results)
 			verifyReferenceSnapshot(t, "race-"+name, snapshot)
+		})
+	}
+}
+
+func TestDeterministicTerminalHoldRaces(t *testing.T) {
+	for _, scenario := range []struct {
+		name, left, right string
+		exposed           bool
+		first             int
+	}{
+		{"capture_capture", "capture", "capture", true, 0},
+		{"release_release", "release", "release", true, 0},
+		{"capture_beats_release", "capture", "release", true, 0},
+		{"release_beats_capture", "capture", "release", true, 1},
+		{"cancel_cancel", "cancel", "cancel", false, 0},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			e := setup(t)
+			f := e.fixture
+			reserve := e.reserve(t)
+			requireApplied(t, e.execute(t, reserve))
+			ref := e.expose(reserve).Expose.Ref
+			if scenario.exposed {
+				requireApplied(t, e.execute(t, e.expose(reserve)))
+				ref.ExpectedVersion = 2
+			}
+			makeResolution := func(kind string) application.Command {
+				cmd := application.Command{BookID: f.BookID, OperationID: domain.NewID()}
+				switch kind {
+				case "capture":
+					cmd.Kind, cmd.Capture = application.CapturePayout, &application.Capture{Ref: ref, Evidence: e.evidence(t, reserve, true, false)}
+				case "release":
+					evidence := e.evidence(t, reserve, false, true)
+					cmd.Kind, cmd.Release = application.ReleasePayout, &application.Release{Ref: ref, Reason: "FINAL_FAILURE", Evidence: &evidence}
+				case "cancel":
+					cmd.Kind, cmd.Release = application.ReleasePayout, &application.Release{Ref: ref, Reason: "CANCEL"}
+				}
+				return cmd
+			}
+			commands := []application.Command{makeResolution(scenario.left), makeResolution(scenario.right)}
+			results := orderedCommands(t, e, scenario.first, commands...)
+			winner := results[scenario.first]
+			loser := results[1-scenario.first]
+			if winner.Outcome != "APPLIED" || loser.Outcome != "REJECTED" || loser.Reason != "STATE_CONFLICT" {
+				t.Fatalf("hold resolved more than once or wrong winner: %+v", results)
+			}
+			captured := commands[scenario.first].Kind == application.CapturePayout
+			want := expectedRaceState{
+				Accounts: map[domain.ID][3]string{f.WalletA: {"0", "100000", "0"}, f.WalletB: {"0", "0", "0"}, f.FeeAccount: {"0", "0", "0"}, f.Pool: {"100000", "0", "0"}},
+				Reserved: "0", Consumed: "0",
+				Counts: map[string]int{"journals": 1, "journal_lines": 2, "financial_operations": 5, "outbox_facts": 5, "business_claims": 1, "holds": 1, "hold_events": 3, "limit_events": 2, "account_events": 8, "resolution_evidence": 2},
+			}
+			terminal := "RELEASED"
+			if captured {
+				terminal = "CAPTURED"
+				want.Accounts[f.WalletA], want.Accounts[f.FeeAccount], want.Accounts[f.Pool] = [3]string{"20200", "100000", "0"}, [3]string{"0", "200", "0"}, [3]string{"100000", "20000", "0"}
+				want.Consumed = "20000"
+				want.Counts["journals"], want.Counts["journal_lines"], want.Counts["account_events"] = 2, 5, 9
+			}
+			if !scenario.exposed {
+				want.Counts["financial_operations"], want.Counts["outbox_facts"], want.Counts["hold_events"], want.Counts["resolution_evidence"] = 4, 4, 2, 0
+			}
+			snapshot := assertRaceState(t, e, want)
+			hold := snapshot.Tables["holds"][0]
+			if hold["hold_id"] != string(reserve.Reserve.HoldID) || hold["state"] != terminal || hold["version"] != strconv.FormatInt(ref.ExpectedVersion+1, 10) || winner.HoldVersion != ref.ExpectedVersion+1 {
+				t.Fatalf("wrong terminal hold state/version: %+v", hold)
+			}
+			claim := snapshot.Tables["business_claims"][0]
+			if claim["state"] != terminal || claim["result_operation_id"] != string(winner.OperationID) || claim["admission_operation_id"] != string(reserve.OperationID) || claim["admission_outcome"] != "APPLIED" {
+				t.Fatal("losing resolution rewrote execution entitlement", claim)
+			}
+			if loser.JournalID != "" || loser.LimitChange != nil || loser.HoldVersion != 0 || len(loser.AccountVersions) != 0 {
+				t.Fatal("rejected resolution claims a financial mutation", loser)
+			}
+			// Both independently signed observations survive, even when they
+			// contradict. Rejection must not erase investigation evidence.
+			for _, cmd := range commands {
+				var evidenceID domain.ID
+				if cmd.Capture != nil {
+					evidenceID = cmd.Capture.Evidence.Claims.ID
+				} else if cmd.Release.Evidence != nil {
+					evidenceID = cmd.Release.Evidence.Claims.ID
+				}
+				if evidenceID == "" {
+					continue
+				}
+				found := false
+				for _, row := range snapshot.Tables["resolution_evidence"] {
+					found = found || row["evidence_id"] == string(evidenceID)
+				}
+				if !found {
+					t.Fatal("resolution evidence was discarded", evidenceID)
+				}
+			}
+			assertRaceReplay(t, e, snapshot, commands, results)
+			verifyReferenceSnapshot(t, "race-"+scenario.name, snapshot)
 		})
 	}
 }
