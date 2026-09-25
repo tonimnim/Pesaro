@@ -26,3 +26,20 @@ jobs:
       - run: go build ./...
       - if: runner.os == 'Linux'
         run: go test -race ./...
+
+  ledger-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Start pinned synthetic TLS database
+        run: bash scripts/ledger/local-db.sh start
+      - name: Verify real persistence, network failures and restart recovery
+        run: bash scripts/ledger/test.sh --race --restart
+      - name: Stop synthetic database
+        if: always()
+        run: bash scripts/ledger/local-db.sh stop
