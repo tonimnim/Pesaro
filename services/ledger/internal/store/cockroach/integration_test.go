@@ -329,11 +329,8 @@ func setup(t *testing.T) *environment {
 		t.Fatal(err)
 	}
 	t.Cleanup(admin.Close)
-	if err = admin.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err = admin.GrantRuntime(ctx); err != nil {
-		t.Fatal(err)
+	if err = admin.Ready(ctx); err != nil {
+		t.Fatalf("prepare schema once with ledger-admin before parallel tests: %v", err)
 	}
 	store, err := cockroach.Open(ctx, runtimeDSN)
 	if err != nil {

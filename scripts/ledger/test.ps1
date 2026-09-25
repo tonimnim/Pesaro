@@ -16,6 +16,13 @@ try {
     $env:PESARO_LEDGER_TEST_RUNTIME_URL = "postgresql://ledger_runtime@localhost:26277/pesaro_ledger?sslmode=verify-full&sslrootcert=$ca&sslcert=$([Uri]::EscapeDataString("$certDir/client.ledger_runtime.crt"))&sslkey=$([Uri]::EscapeDataString("$certDir/client.ledger_runtime.key"))"
     $env:PESAR_LEDGER_EVIDENCE_DIR = Join-Path $ledgerRoot '.cache/ledger-evidence'
     New-Item -ItemType Directory -Force $env:PESAR_LEDGER_EVIDENCE_DIR | Out-Null
+    # Migrate once before Go starts independent financial test packages in parallel.
+    $previousAdminURL = $env:PESAR_LEDGER_ADMIN_URL
+    try {
+        $env:PESAR_LEDGER_ADMIN_URL = $env:PESARO_LEDGER_TEST_ADMIN_URL
+        & go run ./services/ledger/cmd/ledger-admin -synthetic -action=migrate | Tee-Object -FilePath (Join-Path $env:PESAR_LEDGER_EVIDENCE_DIR 'migrate.log')
+        if ($LASTEXITCODE -ne 0) { throw 'Ledger evidence schema preparation failed.' }
+    } finally { $env:PESAR_LEDGER_ADMIN_URL = $previousAdminURL }
     $testArgs = @('test', '-count=1', '-v')
     if ($Race) { $testArgs += '-race' }
     $testArgs += @('./services/ledger/...', './services/reconciliation/internal/verify')
