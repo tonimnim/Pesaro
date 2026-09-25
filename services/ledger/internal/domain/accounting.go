@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -17,6 +18,23 @@ var (
 )
 
 type ID string
+
+func (id *ID) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return ErrIdentity
+	}
+	if value == "" {
+		*id = ""
+		return nil
+	}
+	parsed, err := ParseID(value)
+	if err != nil {
+		return err
+	}
+	*id = parsed
+	return nil
+}
 
 func ParseID(s string) (ID, error) {
 	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
