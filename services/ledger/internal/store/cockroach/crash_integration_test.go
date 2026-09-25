@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -279,5 +280,118 @@ func TestProcessCrashEveryTransferWrite(t *testing.T) {
 	}
 	if snapshot.Counts["journals"] != 2 || snapshot.Counts["business_claims"] != 1 {
 		t.Fatal("wrong transfer history", snapshot.Counts)
+	}
+}
+
+func TestProcessCrashEveryHoldWrite(t *testing.T) {
+	for _, scenario := range []string{"reserve", "expose", "capture", "fenced_release", "cancel"} {
+		t.Run(scenario, func(t *testing.T) {
+			e := setup(t)
+			f := e.fixture
+			reserve := e.reserve(t)
+			command := reserve
+			ref := e.expose(reserve).Expose.Ref
+			state, version, consumed, reserved := "RESERVED", int64(1), "0", "20000"
+			counts := map[string]int{"journals": 1, "journal_lines": 2, "business_claims": 1, "holds": 1, "hold_events": 1, "limit_events": 1, "account_events": 6, "resolution_evidence": 0}
+			accounts := map[domain.ID][3]string{
+				f.WalletA: {"0", "100000", "20200"}, f.WalletB: {"0", "0", "0"},
+				f.Pool: {"100000", "0", "20000"}, f.FeeAccount: {"0", "0", "0"},
+			}
+			if scenario != "reserve" {
+				requireApplied(t, e.execute(t, reserve))
+				command = e.expose(reserve)
+				state, version = "EXPOSED", 2
+				counts["hold_events"] = 2
+			}
+			if scenario == "capture" || scenario == "fenced_release" {
+				requireApplied(t, e.execute(t, command))
+				ref.ExpectedVersion = 2
+				version = 3
+				counts["hold_events"], counts["resolution_evidence"] = 3, 1
+			}
+			switch scenario {
+			case "capture":
+				command = application.Command{BookID: f.BookID, OperationID: domain.NewID(), Kind: application.CapturePayout, Capture: &application.Capture{Ref: ref, Evidence: e.evidence(t, reserve, true, false)}}
+				state, consumed, reserved = "CAPTURED", "20000", "0"
+				accounts[f.WalletA], accounts[f.Pool], accounts[f.FeeAccount] = [3]string{"20200", "100000", "0"}, [3]string{"100000", "20000", "0"}, [3]string{"0", "200", "0"}
+				counts["journals"], counts["journal_lines"], counts["account_events"], counts["limit_events"] = 2, 5, 9, 2
+			case "fenced_release", "cancel":
+				command = application.Command{BookID: f.BookID, OperationID: domain.NewID(), Kind: application.ReleasePayout, Release: &application.Release{Ref: ref, Reason: "CANCEL"}}
+				if scenario == "fenced_release" {
+					ev := e.evidence(t, reserve, false, true)
+					command.Release.Reason, command.Release.Evidence = "FINAL_FAILURE", &ev
+				}
+				state, reserved = "RELEASED", "0"
+				accounts[f.WalletA], accounts[f.Pool] = [3]string{"0", "100000", "0"}, [3]string{"100000", "0", "0"}
+				counts["account_events"], counts["limit_events"] = 8, 2
+			}
+			exerciseWriteCrashes(t, e, command, "APPLIED", "")
+			snapshot := assertRaceState(t, e, expectedRaceState{Accounts: accounts, Reserved: reserved, Consumed: consumed, Counts: counts})
+			hold := snapshot.Tables["holds"][0]
+			if hold["hold_id"] != string(reserve.Reserve.HoldID) || hold["state"] != state || hold["version"] != strconv.FormatInt(version, 10) {
+				t.Fatal("recovered hold has wrong identity/state/version", hold)
+			}
+			claim := snapshot.Tables["business_claims"][0]
+			if claim["state"] != state || claim["admission_operation_id"] != string(reserve.OperationID) || claim["result_operation_id"] != string(command.OperationID) {
+				t.Fatal("recovery changed business entitlement", claim)
+			}
+		})
+	}
+}
+
+func TestProcessCrashEveryControlWrite(t *testing.T) {
+	e := setup(t)
+	f := e.fixture
+	cap, err := domain.ParseWide("200000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := application.Command{BookID: f.BookID, OperationID: domain.NewID(), Kind: application.SetAccountControl, Control: &application.SetControl{
+		Key: application.ControlKey{Kind: "SUBJECT", ID: f.OwnerA}, ExpectedVersion: 1, DailyCap: cap, DebitFrozen: true, RevokeGrants: true, Reason: "CRASH_TEST",
+	}}
+	snapshot := exerciseWriteCrashes(t, e, command, "APPLIED", "")
+	found := false
+	for _, row := range snapshot.Tables["spending_controls"] {
+		if row["subject_kind"] == "SUBJECT" && row["subject_id"] == string(f.OwnerA) {
+			found = true
+			if row["version"] != "2" || row["epoch"] != "2" || row["debit_frozen"] != "true" {
+				t.Fatal("freeze/revocation did not recover exactly once", row)
+			}
+		}
+	}
+	if !found || snapshot.Counts["journals"] != 1 || snapshot.Counts["business_claims"] != 0 {
+		t.Fatal("control recovery mutated money or lost its subject")
+	}
+}
+
+func TestProcessCrashEveryProvisionWrite(t *testing.T) {
+	e := setup(t)
+	command := application.Command{BookID: e.fixture.BookID, OperationID: domain.NewID(), Kind: application.CreateAccount, Create: &application.Create{
+		AccountID: domain.NewID(), OwnerID: domain.NewID(), Purpose: domain.Wallet,
+	}}
+	snapshot := exerciseWriteCrashes(t, e, command, "APPLIED", "")
+	for table, want := range map[string]int{"accounts": 5, "account_balances": 5, "account_events": 5, "spending_controls": 9, "control_events": 9, "journals": 1} {
+		if snapshot.Counts[table] != want {
+			t.Fatal("partial/duplicate provisioning", table, snapshot.Counts)
+		}
+	}
+	if balance := e.balance(t, command.Create.AccountID); !balance.Credits.IsZero() || !balance.Debits.IsZero() || !balance.Held.IsZero() {
+		t.Fatal("new wallet contains unexpected money", balance)
+	}
+}
+
+func TestProcessCrashEveryRejectionWrite(t *testing.T) {
+	e := setup(t)
+	f := e.fixture
+	command := application.Command{BookID: f.BookID, OperationID: domain.NewID(), Kind: application.TransferInternal, Transfer: &application.Transfer{Terms: e.terms(t, "100000", "100", f.Policy100)}}
+	snapshot := exerciseWriteCrashes(t, e, command, "REJECTED", "INSUFFICIENT_FUNDS")
+	for table, want := range map[string]int{"journals": 1, "journal_lines": 2, "business_claims": 1, "account_events": 4, "limit_usage": 0, "holds": 0} {
+		if snapshot.Counts[table] != want {
+			t.Fatal("rejected operation mutated financial state", table, snapshot.Counts)
+		}
+	}
+	claim := snapshot.Tables["business_claims"][0]
+	if claim["state"] != "REJECTED" || claim["admission_operation_id"] != string(command.OperationID) {
+		t.Fatal("permanent rejection lost its entitlement claim", claim)
 	}
 }
