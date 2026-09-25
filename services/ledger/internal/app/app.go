@@ -3,11 +3,15 @@ package app
 
 import (
 	"context"
+	"os"
 
 	"github.com/tonimnim/Pesaro/internal/platform/service"
 )
 
-// Run currently serves operational scaffolding only; business readiness is false.
+// Run serves a configured synthetic Ledger, or the unconfigured health scaffold.
 func Run(ctx context.Context) error {
+	if path := os.Getenv("PESAR_LEDGER_CONFIG"); path != "" {
+		return runConfigured(ctx, path, os.Getenv("PESAR_LEDGER_DATABASE_URL"))
+	}
 	return service.Run(ctx, service.Definition{Name: "ledger", DefaultPort: 8105})
 }
