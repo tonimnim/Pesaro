@@ -100,6 +100,7 @@ type expectedRaceState struct {
 	// aggregates avoids using the production posting arithmetic as the oracle.
 	Accounts           map[domain.ID][3]string
 	Reserved, Consumed string
+	UsageAbsent        bool
 	Counts             map[string]int
 }
 
@@ -120,7 +121,11 @@ func assertRaceState(t *testing.T, e *environment, want expectedRaceState) appli
 		}
 	}
 	usage := snapshot.Tables["limit_usage"]
-	if len(usage) != 1 || usage[0]["owner_id"] != string(e.fixture.OwnerA) || usage[0]["reserved"] != want.Reserved || usage[0]["consumed"] != want.Consumed {
+	if want.UsageAbsent {
+		if len(usage) != 0 {
+			t.Fatalf("rejected spend created limit usage: %+v", usage)
+		}
+	} else if len(usage) != 1 || usage[0]["owner_id"] != string(e.fixture.OwnerA) || usage[0]["reserved"] != want.Reserved || usage[0]["consumed"] != want.Consumed {
 		t.Fatalf("unexpected hard-limit allocation: %+v", usage)
 	}
 	for table, count := range want.Counts {
@@ -291,6 +296,70 @@ func TestDeterministicTerminalHoldRaces(t *testing.T) {
 			}
 			assertRaceReplay(t, e, snapshot, commands, results)
 			verifyReferenceSnapshot(t, "race-"+scenario.name, snapshot)
+		})
+	}
+}
+
+func TestDeterministicFreezeVersusSpend(t *testing.T) {
+	for first, name := range []string{"spend_before_freeze", "freeze_before_spend"} {
+		t.Run(name, func(t *testing.T) {
+			e := setup(t)
+			f := e.fixture
+			spend := application.Command{BookID: f.BookID, OperationID: domain.NewID(), Kind: application.TransferInternal,
+				Transfer: &application.Transfer{Terms: e.terms(t, "10000", "100", f.Policy100)}}
+			freeze := e.setSubject(t, f.OwnerA, 1, 200000, true, true)
+			commands := []application.Command{spend, freeze}
+			results := orderedCommands(t, e, first, commands...)
+			requireApplied(t, results[1])
+			if first == 0 {
+				requireApplied(t, results[0])
+			} else if results[0].Outcome != "REJECTED" || results[0].Reason != "AUTHORIZATION_REVOKED" {
+				t.Fatal("spend passed a committed epoch change", results[0])
+			}
+			want := expectedRaceState{
+				Accounts: map[domain.ID][3]string{f.WalletA: {"10100", "100000", "0"}, f.WalletB: {"0", "10000", "0"}, f.FeeAccount: {"0", "100", "0"}, f.Pool: {"100000", "0", "0"}},
+				Reserved: "0", Consumed: "10000",
+				Counts: map[string]int{"journals": 2, "journal_lines": 5, "financial_operations": 3, "outbox_facts": 3, "business_claims": 1, "holds": 0, "hold_events": 0, "limit_events": 1, "account_events": 7, "control_events": 8},
+			}
+			if first == 1 {
+				want.Accounts[f.WalletA], want.Accounts[f.WalletB], want.Accounts[f.FeeAccount] = [3]string{"0", "100000", "0"}, [3]string{"0", "0", "0"}, [3]string{"0", "0", "0"}
+				want.UsageAbsent = true
+				want.Counts["journals"], want.Counts["journal_lines"], want.Counts["limit_events"], want.Counts["account_events"] = 1, 2, 0, 4
+			}
+			snapshot := assertRaceState(t, e, want)
+			controlFound := false
+			for _, row := range snapshot.Tables["spending_controls"] {
+				if row["subject_kind"] == "SUBJECT" && row["subject_id"] == string(f.OwnerA) {
+					controlFound = true
+					if row["debit_frozen"] != "true" || row["version"] != "2" || row["epoch"] != "2" {
+						t.Fatal("freeze acknowledgement lacks an effective control", row)
+					}
+				}
+			}
+			if !controlFound {
+				t.Fatal("effective subject control missing")
+			}
+			assertRaceReplay(t, e, snapshot, commands, results)
+			// An independent request issued after the freeze acknowledgement has
+			// the current authorization epoch, but must still be blocked by freeze.
+			after := application.Command{BookID: f.BookID, OperationID: domain.NewID(), Kind: application.TransferInternal,
+				Transfer: &application.Transfer{Terms: e.terms(t, "10000", "100", f.Policy100)}}
+			after.Transfer.Terms.Grant.Claims.SubjectEpoch = 2
+			var err error
+			after.Transfer.Terms.Grant, err = application.SignGrant(after.Transfer.Terms.Grant.Claims, e.grantKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := e.execute(t, after)
+			if r.Outcome != "REJECTED" || r.Reason != "ACCOUNT_BLOCKED" {
+				t.Fatal("post-acknowledgement spend escaped the freeze", r)
+			}
+			want.Counts["financial_operations"]++
+			want.Counts["outbox_facts"]++
+			want.Counts["business_claims"]++
+			snapshot = assertRaceState(t, e, want)
+			assertRaceReplay(t, e, snapshot, append(commands, after), append(results, r))
+			verifyReferenceSnapshot(t, "race-"+name, snapshot)
 		})
 	}
 }
