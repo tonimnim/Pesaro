@@ -273,12 +273,56 @@ func TestContinuousDeliveryAcrossCrashesAndLostAck(t *testing.T) {
 		client.CloseIdleConnections()
 	}
 	assertRows(3)
+	// Counts alone cannot prove the intended local mutation. Independently join
+	// each source operation to the receiver and compare canonical receipt bytes,
+	// projected fields and the inbox's complete-envelope digest.
+	rows, err := ledgerSQL.Query(ctx, "SELECT event_id::STRING,operation_id::STRING,body FROM outbox_facts WHERE book_id=$1", book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var sourceEvent, sourceOperation string
+		var sourceBody []byte
+		if err = rows.Scan(&sourceEvent, &sourceOperation, &sourceBody); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		var observedEvent, requestHash, kind, outcome, inboxDigest string
+		var observedBody []byte
+		err = inboxSQL.QueryRow(ctx, "SELECT p.event_id::STRING,p.request_hash,p.kind,p.outcome,p.receipt,i.digest FROM ledger_operations p JOIN event_inbox i ON p.book_id=i.book_id AND p.event_id=i.event_id WHERE p.book_id=$1 AND p.operation_id=$2", book, sourceOperation).Scan(&observedEvent, &requestHash, &kind, &outcome, &observedBody, &inboxDigest)
+		if err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		expectedEvent, err := ledgerevent.New(book, sourceEvent, sourceOperation, sourceBody)
+		if err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		identity, _ := expectedEvent.Identity()
+		canonical, _ := expectedEvent.Encode()
+		expectedDigest := sha256.Sum256(canonical)
+		sourceCanonical, sourceErr := jsoncanonicalizer.Transform(sourceBody)
+		observedCanonical, observedErr := jsoncanonicalizer.Transform(observedBody)
+		if sourceErr != nil || observedErr != nil || !bytes.Equal(sourceCanonical, observedCanonical) || observedEvent != sourceEvent || requestHash != identity.RequestHash || kind != identity.Kind || outcome != identity.Outcome || inboxDigest != hex.EncodeToString(expectedDigest[:]) {
+			rows.Close()
+			t.Fatal("consumer projection differs from the source receipt")
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
+	}
+	rows.Close()
 	// Confirm the delivery/replay path never changed the original money effect.
 	replayed, err := rpc.TransferInternal(ctx, request)
 	if err != nil || replayed.GetJournalId() != receipt.GetJournalId() {
 		t.Fatal("financial identity changed", replayed, err)
 	}
 	verifyLedger(t, ctx, rpc, book, bin["verify"])
+	if dir := os.Getenv("PESAR_LEDGER_EVIDENCE_DIR"); dir != "" {
+		jsonFile(t, filepath.Join(dir, "event-delivery-recovery.json"), map[string]any{"book_id": book, "operation_id": receipt.OperationId, "events": 3, "inbox_rows": 3, "projection_rows": 3, "source_receipts_match": true, "available": "89900", "transport_attempts": attempts.Load(), "injections": []string{"consumer unavailable during fee transfer", "publisher killed before submission", "consumer committed but acknowledgement withheld", "both services killed and restarted", "publisher killed after durable acknowledgement"}})
+	}
 	t.Logf("recovered all 3 committed events; exactly 3 inbox/projection rows; transfer still A=89900; %d transport attempts (duplicates expected)", attempts.Load())
 }
 
