@@ -1,0 +1,180 @@
+syntax = "proto3";
+package pesaro.ledger.v1;
+option go_package = "github.com/tonimnim/Pesaro/contracts/gen/ledger/v1;ledgerv1";
+
+// All amounts and versions are canonical decimal strings. UUIDs are lowercase.
+// A terminal REJECTED receipt is a business result. gRPC failures are technical,
+// access or shape errors; after UNKNOWN/UNAVAILABLE retry the original operation.
+service Ledger {
+  rpc CreateAccount(CreateAccountRequest) returns (Receipt);
+  rpc TransferInternal(TransferInternalRequest) returns (Receipt);
+  rpc ReservePayout(ReservePayoutRequest) returns (Receipt);
+  rpc MarkHoldExposed(MarkHoldExposedRequest) returns (Receipt);
+  rpc CapturePayout(CapturePayoutRequest) returns (Receipt);
+  rpc ReleasePayout(ReleasePayoutRequest) returns (Receipt);
+  rpc SetAccountControl(SetAccountControlRequest) returns (Receipt);
+  rpc GetOperation(GetOperationRequest) returns (Receipt);
+  rpc GetBalance(GetBalanceRequest) returns (Balance);
+  // The complete bounded snapshot is pinned and committed before streaming.
+  // Assemble chunks and verify sha256; an interrupted stream is not a snapshot.
+  rpc ExportLedgerSnapshot(ExportLedgerSnapshotRequest) returns (stream SnapshotChunk);
+}
+message Envelope {
+  string schema_version = 1; // Must be "1".
+  string book_id = 2;
+  string operation_id = 3; // Persist before sending; never regenerate on timeout.
+}
+message Grant {
+  string id = 1;
+  string issuer = 2;
+  string book_id = 3;
+  string payment_id = 4;
+  string subject_id = 5;
+  string source_id = 6;
+  string beneficiary_id = 7;
+  string principal = 8;
+  string fee = 9;
+  string policy_id = 10;
+  string quote_id = 11;
+  string currency = 12;
+  string subject_epoch = 13;
+  string account_epoch = 14;
+  string not_before = 15; // RFC3339Nano UTC.
+  string expires_at = 16;
+}
+message SignedGrant {
+  Grant claims = 1;
+  string signature = 2; // Ed25519, unpadded base64url; domain-separated JCS claims.
+}
+message Terms {
+  string payment_id = 1;
+  string source_id = 2;
+  string beneficiary_id = 3;
+  string principal = 4;
+  string fee = 5;
+  string currency = 6;
+  string policy_id = 7;
+  string quote_id = 8;
+  SignedGrant grant = 9;
+}
+message Evidence {
+  string id = 1;
+  string issuer = 2;
+  string book_id = 3;
+  string payment_id = 4;
+  string hold_id = 5;
+  string attempt_id = 6;
+  string provider_account_id = 7;
+  string beneficiary_id = 8;
+  string principal = 9;
+  string currency = 10;
+  string capability_id = 11;
+  string final_state = 12; // FINAL_SUCCESS or FINAL_FAILURE.
+  bool submission_fenced = 13; // Required for final-failure resolution.
+  string observed_at = 14;
+  string source_digest = 15; // SHA-256 of retained provider evidence.
+}
+message SignedEvidence { Evidence claims = 1; string signature = 2; }
+message HoldRef {
+  string payment_id = 1;
+  string hold_id = 2;
+  string attempt_id = 3;
+  string expected_version = 4;
+}
+message CreateAccountRequest {
+  Envelope envelope = 1;
+  string account_id = 2;
+  string owner_id = 3;
+  string purpose = 4; // M1 runtime permits WALLET only, with zero opening funds.
+}
+message TransferInternalRequest { Envelope envelope = 1; Terms terms = 2; }
+message ReservePayoutRequest {
+  Envelope envelope = 1;
+  Terms terms = 2;
+  string hold_id = 3;
+  string attempt_id = 4;
+  string pool_id = 5;
+  string expires_at = 6;
+}
+message MarkHoldExposedRequest {
+  Envelope envelope = 1;
+  HoldRef ref = 2;
+  string grant_id = 3;
+}
+message CapturePayoutRequest {
+  Envelope envelope = 1;
+  HoldRef ref = 2;
+  SignedEvidence evidence = 3;
+}
+message ReleasePayoutRequest {
+  Envelope envelope = 1;
+  HoldRef ref = 2;
+  string reason = 3; // CANCEL, EXPIRY or FINAL_FAILURE.
+  SignedEvidence evidence = 4; // Present only for FINAL_FAILURE.
+}
+message ControlKey { string kind = 1; string id = 2; }
+message SetAccountControlRequest {
+  Envelope envelope = 1;
+  ControlKey key = 2;
+  string expected_version = 3;
+  bool debit_frozen = 4;
+  bool credit_frozen = 5;
+  string daily_cap = 6; // Subject-wide outgoing principal cap; ACCOUNT must be "0".
+  bool revoke_grants = 7;
+  string reason = 8; // Opaque bounded reason code, not customer data.
+}
+message GetOperationRequest { string book_id = 1; string operation_id = 2; }
+message GetBalanceRequest { string book_id = 1; string account_id = 2; }
+message Usage {
+  string owner_id = 1;
+  string bucket = 2;
+  string reserved = 3;
+  string consumed = 4;
+  string version = 5;
+}
+message LimitChange { Usage before = 1; Usage after = 2; }
+message Receipt {
+  string schema_version = 1;
+  string book_id = 2;
+  string operation_id = 3;
+  string kind = 4;
+  string request_hash = 5;
+  string outcome = 6; // APPLIED or REJECTED.
+  string reason = 7;
+  string payment_id = 8;
+  repeated string subject_ids = 9;
+  string journal_id = 10;
+  string hold_id = 11;
+  string hold_version = 12;
+  map<string,string> control_versions = 13;
+  map<string,string> account_versions = 14;
+  string policy_id = 15;
+  string evidence_id = 16;
+  LimitChange limit_change = 17;
+  string recorded_at = 18;
+  string event_id = 19;
+  string caller_identity = 20;
+}
+message Balance {
+  string book_id = 1;
+  string account_id = 2;
+  string currency = 3;
+  string scale = 4;
+  string purpose = 5;
+  string debits_posted = 6;
+  string credits_posted = 7;
+  string held = 8;
+  string posted = 9;
+  string available = 10;
+  string version = 11;
+}
+message ExportLedgerSnapshotRequest { string book_id = 1; }
+message SnapshotChunk {
+  string schema_version = 1;
+  string book_id = 2;
+  string cut = 3;
+  uint32 index = 4;
+  bytes data = 5; // Part of the UTF-8 JSON snapshot artifact.
+  string sha256 = 6; // Digest of the complete artifact, repeated on every chunk.
+  bool last = 7;
+}
