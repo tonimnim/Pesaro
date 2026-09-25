@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -61,7 +62,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, application.ErrUnavailable
 	}
-	if !strings.Contains(version, "CockroachDB") || !strings.Contains(version, EngineVersion) {
+	if !strings.Contains(version, "CockroachDB") || !slices.Contains(strings.Fields(version), EngineVersion) {
 		pool.Close()
 		return nil, fmt.Errorf("Ledger adapter requires CockroachDB %s", EngineVersion)
 	}
@@ -124,6 +125,11 @@ func (s *Store) GrantRuntime(ctx context.Context) error {
 	// Each privilege is explicit: history and immutable account/policy identity
 	// cannot be updated/deleted by the serving workload.
 	statements := []string{
+		// CockroachDB's public schema initially grants CREATE through the public
+		// role. This private service database must not inherit migration authority.
+		"REVOKE CREATE ON SCHEMA public FROM public",
+		"REVOKE CREATE ON SCHEMA public FROM ledger_runtime",
+		"REVOKE CREATE ON DATABASE pesaro_ledger FROM ledger_runtime",
 		"GRANT CONNECT ON DATABASE pesaro_ledger TO ledger_runtime",
 		"GRANT USAGE ON SCHEMA public TO ledger_runtime",
 		"GRANT SELECT ON TABLE schema_migrations,books,accounts,posting_policies,account_balances,spending_controls,business_claims,holds,limit_usage,journals,journal_lines,account_events,control_events,hold_events,limit_events,resolution_evidence,financial_operations,outbox_facts,outbox_delivery TO ledger_runtime",
