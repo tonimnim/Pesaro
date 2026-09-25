@@ -25,7 +25,10 @@ import (
 //go:embed migrations/001_initial.sql
 var migration string
 
-const SchemaVersion = 1
+//go:embed migrations/002_outbox_route.sql
+var outboxMigration string
+
+const SchemaVersion = 2
 const EngineVersion = "v26.2.3"
 
 type Store struct {
@@ -88,7 +91,10 @@ func (s *Store) ReadyForBooks(ctx context.Context, books []domain.ID) error {
 	return nil
 }
 func checksum() string {
-	h := sha256.Sum256([]byte(strings.ReplaceAll(migration, "\r\n", "\n")))
+	return migrationChecksum(outboxMigration)
+}
+func migrationChecksum(sql string) string {
+	h := sha256.Sum256([]byte(strings.ReplaceAll(sql, "\r\n", "\n")))
 	return hex.EncodeToString(h[:])
 }
 func (s *Store) Ready(ctx context.Context) error {
@@ -107,17 +113,24 @@ func (s *Store) Ready(ctx context.Context) error {
 // Migrate is invoked only by the separate privileged administration command.
 // Runtime startup never executes DDL or grants itself permissions.
 func (s *Store) Migrate(ctx context.Context) error {
-	for _, statement := range strings.Split(migration, ";") {
-		if strings.TrimSpace(statement) == "" {
-			continue
+	for index, sql := range []string{migration, outboxMigration} {
+		version := index + 1
+		for _, statement := range strings.Split(sql, ";") {
+			if strings.TrimSpace(statement) == "" {
+				continue
+			}
+			if _, err := s.pool.Exec(ctx, statement); err != nil {
+				return fmt.Errorf("ledger migration: %w", err)
+			}
 		}
-		if _, err := s.pool.Exec(ctx, statement); err != nil {
-			return fmt.Errorf("ledger migration: %w", err)
+		_, err := s.pool.Exec(ctx, "INSERT INTO schema_migrations(version,checksum) VALUES ($1,$2) ON CONFLICT(version) DO NOTHING", version, migrationChecksum(sql))
+		if err != nil {
+			return err
 		}
-	}
-	_, err := s.pool.Exec(ctx, "INSERT INTO schema_migrations(version,checksum) VALUES ($1,$2) ON CONFLICT(version) DO NOTHING", SchemaVersion, checksum())
-	if err != nil {
-		return err
+		var recorded string
+		if err = s.pool.QueryRow(ctx, "SELECT checksum FROM schema_migrations WHERE version=$1", version).Scan(&recorded); err != nil || recorded != migrationChecksum(sql) {
+			return errors.New("Ledger migration checksum mismatch")
+		}
 	}
 	return s.Ready(ctx)
 }
@@ -135,6 +148,7 @@ func (s *Store) GrantRuntime(ctx context.Context) error {
 		"GRANT SELECT ON TABLE schema_migrations,books,accounts,posting_policies,account_balances,spending_controls,business_claims,holds,limit_usage,journals,journal_lines,account_events,control_events,hold_events,limit_events,resolution_evidence,financial_operations,outbox_facts,outbox_delivery TO ledger_runtime",
 		"GRANT INSERT ON TABLE accounts,account_balances,spending_controls,business_claims,holds,limit_usage,journals,journal_lines,account_events,control_events,hold_events,limit_events,resolution_evidence,financial_operations,outbox_facts,outbox_delivery TO ledger_runtime",
 		"GRANT UPDATE ON TABLE account_balances,spending_controls,business_claims,holds,limit_usage,outbox_delivery TO ledger_runtime",
+		"GRANT SELECT,INSERT ON TABLE outbox_routes TO ledger_runtime",
 	}
 	for _, q := range statements {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

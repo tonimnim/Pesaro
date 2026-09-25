@@ -2,12 +2,46 @@ package cockroach
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tonimnim/Pesaro/services/ledger/internal/application"
 	"github.com/tonimnim/Pesaro/services/ledger/internal/domain"
 )
+
+// BindOutboxConsumer makes the current single-consumer acknowledgement model
+// explicit. Routing a used book to a different consumer needs a reviewed replay
+// migration, not a configuration edit that silently skips delivered history.
+func (s *Store) BindOutboxConsumer(ctx context.Context, book domain.ID, consumer string) error {
+	if !book.Valid() || len(consumer) == 0 || len(consumer) > 256 {
+		return application.ErrInvalid
+	}
+	_, err := s.Transact(ctx, func(transaction application.Transaction) (application.Receipt, error) {
+		t := transaction.(*tx)
+		var existing string
+		err := t.QueryRow(ctx, "SELECT consumer_id FROM outbox_routes WHERE book_id=$1", string(book)).Scan(&existing)
+		if err == nil {
+			if existing != consumer {
+				return application.Receipt{}, application.ErrConflict
+			}
+			return application.Receipt{}, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return application.Receipt{}, err
+		}
+		var used bool
+		if err = t.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM outbox_delivery WHERE book_id=$1 AND (delivered OR attempts>0))", string(book)).Scan(&used); err != nil {
+			return application.Receipt{}, err
+		}
+		if used {
+			return application.Receipt{}, application.ErrConflict
+		}
+		return application.Receipt{}, t.write(ctx, "INSERT INTO outbox_routes(book_id,consumer_id) VALUES($1,$2)", string(book), consumer)
+	})
+	return err
+}
 
 // LeasedFact is an immutable fact plus revocable delivery ownership.
 type LeasedFact struct {

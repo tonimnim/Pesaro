@@ -17,8 +17,11 @@ import (
 	"strings"
 	"time"
 
+	ledgerevent "github.com/tonimnim/Pesaro/contracts/events/ledger/v1"
+	"github.com/tonimnim/Pesaro/internal/platform/eventtransport"
 	"github.com/tonimnim/Pesaro/services/ledger/internal/application"
 	"github.com/tonimnim/Pesaro/services/ledger/internal/domain"
+	"github.com/tonimnim/Pesaro/services/ledger/internal/publisher"
 )
 
 // Config contains paths and public authorization policy, never issuer private keys.
@@ -31,6 +34,13 @@ type Config struct {
 	Callers      []CallerRule      `json:"callers"`
 	GrantKeys    map[string]string `json:"grant_keys"`
 	EvidenceKeys map[string]string `json:"evidence_keys"`
+	Outbox       *OutboxConfig     `json:"outbox,omitempty"`
+}
+type OutboxConfig struct {
+	Endpoint         string                  `json:"endpoint"`
+	ConsumerIdentity string                  `json:"consumer_identity"`
+	TLS              eventtransport.TLSFiles `json:"tls"`
+	Options          publisher.Options       `json:"worker"`
 }
 type TLSFiles struct {
 	Certificate string `json:"certificate"`
@@ -46,10 +56,11 @@ type CallerRule struct {
 }
 type preparedConfig struct {
 	Config
-	tls   *tls.Config
-	rules map[string]application.Caller
-	trust application.Trust
-	books []domain.ID
+	tls       *tls.Config
+	rules     map[string]application.Caller
+	trust     application.Trust
+	books     []domain.ID
+	outboxTLS *tls.Config
 }
 
 var errConfig = errors.New("invalid Ledger configuration; synthetic mode, loopback listeners, TLS and explicit scoped policy required")
@@ -178,6 +189,17 @@ func loadConfig(path string) (preparedConfig, error) {
 		return preparedConfig{}, errConfig
 	}
 	p.tls = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}, ClientCAs: roots, ClientAuth: tls.RequireAndVerifyClientCert}
+	if c.Outbox != nil {
+		if !eventtransport.Endpoint(c.Outbox.Endpoint, ledgerevent.Path) {
+			return preparedConfig{}, errConfig
+		}
+		if p.Outbox.Options, err = c.Outbox.Options.Defaults(); err != nil {
+			return preparedConfig{}, errConfig
+		}
+		if p.outboxTLS, err = eventtransport.LoadTLS(path, c.Outbox.TLS, false, c.Outbox.ConsumerIdentity); err != nil {
+			return preparedConfig{}, errConfig
+		}
+	}
 	return p, nil
 }
 func loopbackAddress(address string) bool {

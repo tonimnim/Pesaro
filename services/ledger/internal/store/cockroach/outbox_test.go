@@ -97,3 +97,24 @@ func TestOutboxPublishersClaimOneOwner(t *testing.T) {
 		t.Fatalf("expected one delivery owner, got %d", count)
 	}
 }
+
+func TestOutboxConsumerBindingCannotSilentlySwitch(t *testing.T) {
+	e := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for range 2 {
+		if err := e.store.BindOutboxConsumer(ctx, e.fixture.BookID, "spiffe://pesar.test/reconciliation"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.store.BindOutboxConsumer(ctx, e.fixture.BookID, "spiffe://pesar.test/other"); err != application.ErrConflict {
+		t.Fatal("consumer switch was not fenced", err)
+	}
+	used := setup(t)
+	if _, err := used.store.ClaimOutbox(ctx, used.fixture.BookID, 1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := used.store.BindOutboxConsumer(ctx, used.fixture.BookID, "spiffe://pesar.test/reconciliation"); err != application.ErrConflict {
+		t.Fatal("previously used unbound stream silently adopted", err)
+	}
+}

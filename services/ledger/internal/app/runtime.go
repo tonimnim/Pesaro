@@ -10,7 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tonimnim/Pesaro/internal/platform/eventtransport"
 	"github.com/tonimnim/Pesaro/services/ledger/internal/application"
+	"github.com/tonimnim/Pesaro/services/ledger/internal/publisher"
 	"github.com/tonimnim/Pesaro/services/ledger/internal/store/cockroach"
 	"github.com/tonimnim/Pesaro/services/ledger/internal/transport"
 	"google.golang.org/grpc"
@@ -22,6 +24,7 @@ type Runtime struct {
 	store   *cockroach.Store
 	server  *grpc.Server
 	serving atomic.Bool
+	outbox  *eventtransport.Client
 }
 
 func Open(ctx context.Context, path, dsn string) (*Runtime, error) {
@@ -47,9 +50,26 @@ func Open(ctx context.Context, path, dsn string) (*Runtime, error) {
 		store.Close()
 		return nil, err
 	}
-	return &Runtime{config: config, store: store, server: server}, nil
+	r := &Runtime{config: config, store: store, server: server}
+	if config.Outbox != nil {
+		for _, book := range config.books {
+			if err = store.BindOutboxConsumer(startup, book, config.Outbox.ConsumerIdentity); err != nil {
+				r.Close()
+				return nil, errors.New("Ledger outbox consumer binding requires review")
+			}
+		}
+		r.outbox = eventtransport.NewClient(config.Outbox.Endpoint, config.outboxTLS)
+	}
+	return r, nil
 }
-func (r *Runtime) Close() { r.serving.Store(false); r.server.Stop(); r.store.Close() }
+func (r *Runtime) Close() {
+	r.serving.Store(false)
+	r.server.Stop()
+	if r.outbox != nil {
+		r.outbox.Close()
+	}
+	r.store.Close()
+}
 
 // Serve accepts already-bound listeners, allowing tests to use ephemeral ports.
 // Callers own Close; Serve always drains/stops both listeners before returning.
@@ -59,6 +79,23 @@ func (r *Runtime) Serve(ctx context.Context, rpcListener, opsListener net.Listen
 	if ctx.Err() != nil {
 		return nil
 	}
+	worker, stopWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	if r.outbox == nil {
+		close(workerDone)
+	} else {
+		go func() {
+			defer close(workerDone)
+			var lastWarning time.Time
+			_ = publisher.Run(worker, r.store, r.config.books, r.config.Outbox.Options, r.outbox.Send, func(error) {
+				if time.Since(lastWarning) >= 30*time.Second {
+					slog.Warn("ledger event delivery pending; original facts retained")
+					lastWarning = time.Now()
+				}
+			})
+		}()
+	}
+	defer func() { stopWorker(); <-workerDone }()
 	httpServer := &http.Server{Handler: r.operations(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	stopped := make(chan error, 2)
 	r.serving.Store(true)
