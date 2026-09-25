@@ -37,7 +37,8 @@ if [ "$ledger_action" = stop ] || [ "$ledger_action" = crash ]; then
   echo "Database still stopping; no second signal sent." >&2
   exit 1
 fi
-if owned_pid; then echo "Synthetic CockroachDB already running."; exit 0; fi
+ledger_running=false
+if owned_pid; then ledger_running=true; fi
 if [ ! -x "$ledger_bin" ]; then
   ledger_archive="$ledger_root/.cache/ledger-tools/cockroach-$ledger_version.linux-amd64.tgz"
   curl --fail --silent --show-error --location "https://binaries.cockroachdb.com/cockroach-$ledger_version.linux-amd64.tgz" -o "$ledger_archive"
@@ -53,7 +54,7 @@ fi
 if [ ! -f "$ledger_private/certs/node.crt" ]; then
   "$ledger_bin" cert create-node localhost 127.0.0.1 --certs-dir="$ledger_private/certs" --ca-key="$ledger_private/ca.key"
 fi
-for ledger_user in root ledger_runtime; do
+for ledger_user in root ledger_runtime reconciliation_runtime; do
   if [ ! -f "$ledger_private/certs/client.$ledger_user.crt" ]; then
     "$ledger_bin" cert create-client "$ledger_user" --certs-dir="$ledger_private/certs" --ca-key="$ledger_private/ca.key"
   fi
@@ -61,6 +62,8 @@ for ledger_user in root ledger_runtime; do
   cp "$ledger_private/certs/client.$ledger_user.key" "$ledger_dir/certs/"
 done
 cp "$ledger_private/certs/ca.crt" "$ledger_dir/certs/"
-"$ledger_bin" start-single-node --certs-dir="$ledger_private/certs" --listen-addr=127.0.0.1:26277 --http-addr=127.0.0.1:8087 --store="$ledger_dir/data" --cache=128MiB --max-sql-memory=128MiB --pid-file="$ledger_dir/cockroach.pid" --log-dir="$ledger_dir/logs" --background
-"$ledger_bin" sql --certs-dir="$ledger_private/certs" --host=localhost:26277 --execute="CREATE DATABASE IF NOT EXISTS pesaro_ledger; CREATE USER IF NOT EXISTS ledger_runtime;"
+if ! "$ledger_running"; then
+  "$ledger_bin" start-single-node --certs-dir="$ledger_private/certs" --listen-addr=127.0.0.1:26277 --http-addr=127.0.0.1:8087 --store="$ledger_dir/data" --cache=128MiB --max-sql-memory=128MiB --pid-file="$ledger_dir/cockroach.pid" --log-dir="$ledger_dir/logs" --background
+fi
+"$ledger_bin" sql --certs-dir="$ledger_private/certs" --host=localhost:26277 --execute="CREATE DATABASE IF NOT EXISTS pesaro_ledger; CREATE USER IF NOT EXISTS ledger_runtime; CREATE DATABASE IF NOT EXISTS pesaro_reconciliation; CREATE USER IF NOT EXISTS reconciliation_runtime;"
 echo "Synthetic TLS database ready on localhost:26277. Private certificates are local and ignored."
