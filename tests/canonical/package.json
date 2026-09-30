@@ -1,0 +1,8 @@
+{
+  "name": "pesar-ledger-canonical-evidence",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.18.1" },
+  "scripts": { "test": "node verify.mjs" },
+  "devDependencies": { "protobufjs": "8.8.0" }
+}
